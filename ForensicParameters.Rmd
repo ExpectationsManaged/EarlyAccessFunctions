@@ -1,0 +1,512 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+library(tidyverse)
+```
+
+
+
+
+```{r}
+popdf <- read_delim(file.choose(), "\t", 
+                  escape_double = FALSE, 
+                  col_types = cols(
+                    Population = col_character(), 
+                    SampleName = col_character(), 
+                    Locus = col_character(), 
+                    Allele = col_character(), 
+                    Haplotype = col_character(), 
+                    HaplotypeSum = col_number(), 
+                    HB = col_number()), 
+                  trim_ws = TRUE)
+```
+
+
+#Tidying up data frame
+```{r}
+CombinedAlleleDepth <- popdf %>% 
+  group_by(SampleName, Locus) %>% 
+  summarise(AD = sum(HaplotypeSum)) %>% 
+  ungroup()
+
+popdf <- left_join(popdf, CombinedAlleleDepth, 
+                   by = c("SampleName", "Locus")) %>% 
+  group_by(SampleName, Locus) %>% 
+  mutate(
+    AlleleRank = rank(Allele, ties.method = "first"),
+    Interp = if_else(is.na(HB), "Hom", "Het")
+    ) %>% 
+  ungroup()
+
+rm(CombinedAlleleDepth)
+```
+
+
+
+#Locus-level signal summary
+```{r}
+LocusWrapup <- popdf %>%
+  filter(AlleleRank == 1, AD >= 1) %>% 
+  group_by(Locus) %>%
+  summarise(mean.AD = mean(AD, na.rm = TRUE),
+            sd.AD = sd(AD, na.rm = TRUE),
+            n.AD = n()) %>%
+  ungroup() %>%
+  mutate(se.AD = sd.AD / sqrt(n.AD),
+        lower.ci.AD = mean.AD - qt(1 - (0.05 / 2), n.AD - 1) * se.AD,
+        upper.ci.AD = mean.AD + qt(1 - (0.05 / 2), n.AD - 1) * se.AD,
+        cv.AD = sd.AD / mean.AD)
+```
+
+
+
+#Heterozygote balance
+```{r}
+HetLoci <- popdf %>% 
+  filter(AlleleRank == 1, HB >= 0) %>%
+  mutate(HB_trad = dplyr::if_else(HB > 1, 1/HB, HB))
+
+hbWrapup <- HetLoci %>%
+  group_by(Locus, Population) %>%
+  summarise(mean.HB_trad = mean(HB_trad, na.rm = TRUE),
+            sd.HB_trad = sd(HB_trad, na.rm = TRUE),
+            n.HB = n(), 
+            mean.HB = mean(HB, na.rm = TRUE),
+            sd.HB = sd(HB, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(se.HB_trad = sd.HB_trad / sqrt(n.HB),
+        lower.ci.HB_trad = mean.HB_trad - qt(1 - (0.05 / 2), n.HB - 1) * se.HB_trad,
+        upper.ci.HB_trad = mean.HB_trad + qt(1 - (0.05 / 2), n.HB - 1) * se.HB_trad, 
+        cv.HB_trad = sd.HB_trad / mean.HB_trad,
+        se.HB = sd.HB / sqrt(n.HB),
+        lower.ci.HB = mean.HB - qt(1 - (0.05 / 2), n.HB - 1) * se.HB,
+        upper.ci.HB = mean.HB + qt(1 - (0.05 / 2), n.HB - 1) * se.HB, 
+        cv.HB = sd.HB / mean.HB)
+
+```
+
+
+#Forensic Parameters
+```{r}
+#Isolate columns of interest
+haps <- popdf %>% 
+  select(Population, SampleName, Locus, Allele, Haplotype, Interp, AlleleRank)
+
+#Duplicate homozygous loci
+haps <- haps %>% 
+  filter(Interp == "Hom") %>% 
+  mutate(AlleleRank = 2) %>% 
+  bind_rows(haps) %>% 
+  arrange(Population, SampleName, Locus, AlleleRank)
+
+#Calculate observed heterozygosity
+obsHet <- haps %>% 
+  filter(AlleleRank == 1) %>% 
+  group_by(Population, Locus, Interp) %>% 
+  summarize(total = n()) %>% 
+  ungroup() %>% 
+  pivot_wider(
+    names_from = Interp,
+    values_from = total
+  ) %>%
+  mutate(obsHet = round(Het/(Het + Hom),3)) %>% 
+  select(-Het, -Hom)
+
+
+#Count observations
+popSum1 <- haps %>% 
+  group_by(Population, Locus) %>% 
+  summarize(total = n()) %>% 
+  ungroup()
+
+
+#Calculate hap frequencies
+hapFreqbyPop <- haps %>% 
+  group_by(Population, Locus, Haplotype) %>% 
+  summarize(hapCount = n()) %>% 
+  ungroup() %>% 
+  left_join(popSum1, by = c("Population", "Locus")) %>% 
+  mutate(hapFreq = hapCount/total) %>% 
+  select(-hapCount)
+
+
+#Calculate allele frequencies
+alleleFreqbyPop <- haps %>% 
+  group_by(Population, Locus, Allele) %>% 
+  summarize(alleleCount = n()) %>% 
+  ungroup() %>% 
+  left_join(popSum1, by = c("Population", "Locus")) %>% 
+  mutate(alleleFreq = alleleCount/total) %>% 
+  select(-alleleCount)
+
+rm(haps, popSum1)
+
+#Isolate heterozygote genotypes
+hetProbs <- hapFreqbyPop %>% 
+  group_by(Population, Locus) %>% 
+  tidyr::expand(Haplotype, Haplotype2 = Haplotype) %>% 
+  filter(Haplotype < Haplotype2) 
+
+#Join genotypes and allele frequencies
+hetProbs <- left_join(hetProbs, hapFreqbyPop, 
+                      by = c("Population", "Locus", "Haplotype")) %>% 
+  select(-total)
+
+#Calculate genotype probabilities
+hetProbs <- left_join(hetProbs, dplyr::rename(hapFreqbyPop, 
+                                       Haplotype2 = Haplotype, 
+                                       hapFreq2 = hapFreq), 
+                      by = c("Population", "Locus", "Haplotype2")) %>%
+  mutate(gtProb = (2 * hapFreq2 * hapFreq)^2) %>%
+  select(-hapFreq2, -hapFreq, -total)
+
+#Isolate homozygote genotypes
+homProbs <- hapFreqbyPop %>% 
+  group_by(Population, Locus) %>% 
+  tidyr::expand(Haplotype, Haplotype2 = Haplotype) %>% 
+  filter(Haplotype == Haplotype2)
+
+#Join genotypes and allele frequencies
+homProbs <- left_join(homProbs, hapFreqbyPop, 
+                      by = c("Population", "Locus", "Haplotype")) %>% 
+  select(-total)
+
+#Calculate genotype probabilities
+homProbs <- left_join(homProbs, dplyr::rename(hapFreqbyPop, Haplotype2 = Haplotype, hapFreq2 = hapFreq), 
+                      by = c("Population", "Locus", "Haplotype2")) %>%
+  mutate(gtProb = (hapFreq2 * hapFreq)^2) %>%
+  select(-hapFreq2, -hapFreq, -total)
+
+#Combine gtProbs
+gtProbs <- bind_rows(homProbs, hetProbs) %>% 
+  arrange(Population, Locus)
+
+rm(homProbs, hetProbs)
+
+#tidying data before forensic parameters
+paramsv1 <- hapFreqbyPop %>% 
+  mutate(
+    p2 = (hapFreq * hapFreq), 
+    p4 = hapFreq ^ 4,
+    dipN = total
+  ) %>% 
+  select(-total)
+
+#Calculate expected heterozygosity, effective number of alleles, and PIC
+paramSum <- paramsv1 %>% 
+  select(-Haplotype, -hapFreq) %>% 
+  group_by(Population, Locus) %>% 
+  summarize(
+    expHet = round(1 - sum(p2) * (dipN / (dipN -1)), 3),
+    Ae = round(1 / sum(p2), 2),
+    PIC = round(1 - sum(p2) - (sum(p2)^2) + sum(p4), 3)
+  ) %>% 
+  ungroup() %>% 
+  distinct(Population, Locus, .keep_all = TRUE)
+
+#Calculate power of discrimination
+tempPD <- gtProbs %>% 
+  group_by(Population, Locus) %>% 
+  summarize(
+    PD = round(1 - sum(gtProb), 3)
+  )
+
+#Join data frames
+paramSum <- left_join(paramSum, obsHet, 
+                      by = c("Population", "Locus")) %>% 
+  left_join(tempPD, 
+            by = c("Population", "Locus"))
+
+rm(paramsv1, tempPD, obsHet, gtProbs)
+
+
+```
+
+
+#Clean up data frames for export
+```{r}
+
+hapFreqbyPop_wide <- pivot_wider(hapFreqbyPop, 
+                                 values_from = c("hapFreq", "total"), 
+                                 names_from = "Population")
+
+alleleFreqbyPop_wide <- pivot_wider(alleleFreqbyPop, 
+                                    values_from = c("alleleFreq", "total"), 
+                                    names_from = "Population")
+
+forensicParams_wide <- pivot_wider(paramSum, 
+                                   names_from = "Population", 
+                                   values_from = c("obsHet", "expHet", "Ae", "PIC", "obsHet", "PD"))
+
+combinedRMP <- paramSum %>% 
+  group_by(Population) %>% 
+  mutate(cRMP = prod(1 - PD)) %>% 
+  select(Population, cRMP) %>% 
+  distinct(Population, 
+           .keep_all = TRUE)
+```
+
+
+#save all the files
+```{r}
+# write_tsv(hapFreqbyPop_wide, paste0("C:\\Users\\jlk0260\\OneDrive - UNT System\\Cloud\\Work\\Manuscripts\\Muenzler_NimaGen_PopulationStudy_2024\\ROutputs\\hapFreqbyPop_wide.tsv"))
+# 
+# write_tsv(alleleFreqbyPop_wide, paste0("C:\\Users\\jlk0260\\OneDrive - UNT System\\Cloud\\Work\\Manuscripts\\Muenzler_NimaGen_PopulationStudy_2024\\ROutputs\\alleleFreqbyPop_wide.tsv"))
+# 
+# write_tsv(forensicParams_wide, paste0("C:\\Users\\jlk0260\\OneDrive - UNT System\\Cloud\\Work\\Manuscripts\\Muenzler_NimaGen_PopulationStudy_2024\\ROutputs\\forensicParams_wide.tsv"))
+# 
+# write_tsv(combinedRMP, paste0("C:\\Users\\jlk0260\\OneDrive - UNT System\\Cloud\\Work\\Manuscripts\\Muenzler_NimaGen_PopulationStudy_2024\\ROutputs\\combinedRMP.tsv"))
+# 
+# write_tsv(LocusWrapup, paste0("C:\\Users\\jlk0260\\OneDrive - UNT System\\Cloud\\Work\\Manuscripts\\Muenzler_NimaGen_PopulationStudy_2024\\ROutputs\\LocusWrapup.tsv"))
+# 
+# write_tsv(hbWrapup, paste0("C:\\Users\\jlk0260\\OneDrive - UNT System\\Cloud\\Work\\Manuscripts\\Muenzler_NimaGen_PopulationStudy_2024\\ROutputs\\hbWrapup.tsv"))
+
+```
+
+
+
+```{r}
+
+calc_ForensicParams <- function(path_popdf = ""){
+  
+  #Import data
+  popdf <- read_delim(path_popdf, "\t", 
+                  escape_double = FALSE, 
+                  col_types = cols(
+                    Population = col_character(), 
+                    SampleName = col_character(), 
+                    Locus = col_character(), 
+                    Allele = col_character(), 
+                    Haplotype = col_character(), 
+                    HaplotypeSum = col_number(), 
+                    HB = col_number()), 
+                  trim_ws = TRUE)
+  
+  #Gathering Locus-Level Data
+  CombinedAlleleDepth <- popdf %>% 
+    group_by(SampleName, Locus) %>% 
+    summarise(AD = sum(HaplotypeSum)) %>% 
+    ungroup()
+
+  #Joining locus depth and differentiating heterozygous and homozygous loci
+  popdf <- left_join(popdf, CombinedAlleleDepth, 
+                    by = c("SampleName", "Locus")) %>% 
+    group_by(SampleName, Locus) %>% 
+    mutate(
+      AlleleRank = rank(Allele, ties.method = "first"),
+      Interp = if_else(is.na(HB), "Hom", "Het")
+      ) %>% 
+    ungroup()
+  
+  #Calculate descriptive stats for loci
+  LocusWrapup <- popdf %>%
+  filter(AlleleRank == 1, AD >= 1) %>% 
+  group_by(Locus) %>%
+  summarise(mean.AD = mean(AD, na.rm = TRUE),
+            sd.AD = sd(AD, na.rm = TRUE),
+            n.AD = n()) %>%
+  ungroup() %>%
+  mutate(se.AD = sd.AD / sqrt(n.AD),
+        lower.ci.AD = mean.AD - qt(1 - (0.05 / 2), n.AD - 1) * se.AD,
+        upper.ci.AD = mean.AD + qt(1 - (0.05 / 2), n.AD - 1) * se.AD,
+        cv.AD = sd.AD / mean.AD)
+  
+  #Calculate descriptive stats for both heterozygote balance formulas
+  HetLoci <- popdf %>% 
+  filter(AlleleRank == 1, HB >= 0) %>%
+  mutate(HB_trad = dplyr::if_else(HB > 1, 1/HB, HB))
+
+  hbWrapup <- HetLoci %>%
+    group_by(Locus, Population) %>%
+    summarise(mean.HB_trad = mean(HB_trad, na.rm = TRUE),
+              sd.HB_trad = sd(HB_trad, na.rm = TRUE),
+              n.HB = n(), 
+              mean.HB = mean(HB, na.rm = TRUE),
+              sd.HB = sd(HB, na.rm = TRUE)) %>%
+    ungroup() %>%
+    mutate(se.HB_trad = sd.HB_trad / sqrt(n.HB),
+          lower.ci.HB_trad = mean.HB_trad - qt(1 - (0.05 / 2), n.HB - 1) * se.HB_trad,
+          upper.ci.HB_trad = mean.HB_trad + qt(1 - (0.05 / 2), n.HB - 1) * se.HB_trad, 
+          cv.HB_trad = sd.HB_trad / mean.HB_trad,
+          se.HB = sd.HB / sqrt(n.HB),
+          lower.ci.HB = mean.HB - qt(1 - (0.05 / 2), n.HB - 1) * se.HB,
+          upper.ci.HB = mean.HB + qt(1 - (0.05 / 2), n.HB - 1) * se.HB, 
+          cv.HB = sd.HB / mean.HB)
+  
+  #Isolate columns of interest
+  haps <- popdf %>% 
+    select(Population, SampleName, Locus, Allele, Haplotype, Interp, AlleleRank)
+  
+  #Duplicate homozygous loci
+  haps <- haps %>% 
+    filter(Interp == "Hom") %>% 
+    mutate(AlleleRank = 2) %>% 
+    bind_rows(haps) %>% 
+    arrange(Population, SampleName, Locus, AlleleRank)
+  
+  #Calculate observed heterozygosity
+  obsHet <- haps %>% 
+    filter(AlleleRank == 1) %>% 
+    group_by(Population, Locus, Interp) %>% 
+    summarize(total = n()) %>% 
+    ungroup() %>% 
+    pivot_wider(
+      names_from = Interp,
+      values_from = total
+    ) %>%
+    mutate(obsHet = round(Het/(Het + Hom),3)) %>% 
+    select(-Het, -Hom)
+  
+  
+  #Count observations
+  popSum1 <- haps %>% 
+    group_by(Population, Locus) %>% 
+    summarize(total = n()) %>% 
+    ungroup()
+  
+  
+  #Calculate hap frequencies
+  hapFreqbyPop <- haps %>% 
+    group_by(Population, Locus, Haplotype) %>% 
+    summarize(hapCount = n()) %>% 
+    ungroup() %>% 
+    left_join(popSum1, by = c("Population", "Locus")) %>% 
+    mutate(hapFreq = hapCount/total) %>% 
+    select(-hapCount)
+  
+  
+  #Calculate allele frequencies
+  alleleFreqbyPop <- haps %>% 
+    group_by(Population, Locus, Allele) %>% 
+    summarize(alleleCount = n()) %>% 
+    ungroup() %>% 
+    left_join(popSum1, by = c("Population", "Locus")) %>% 
+    mutate(alleleFreq = alleleCount/total) %>% 
+    select(-alleleCount)
+  
+  rm(haps, popSum1)
+  
+  #Isolate heterozygote genotypes
+  hetProbs <- hapFreqbyPop %>% 
+    group_by(Population, Locus) %>% 
+    tidyr::expand(Haplotype, Haplotype2 = Haplotype) %>% 
+    filter(Haplotype < Haplotype2) 
+  
+  #Join genotypes and allele frequencies
+  hetProbs <- left_join(hetProbs, hapFreqbyPop, 
+                        by = c("Population", "Locus", "Haplotype")) %>% 
+    select(-total)
+  
+  #Calculate genotype probabilities
+  hetProbs <- left_join(hetProbs, dplyr::rename(hapFreqbyPop, 
+                                         Haplotype2 = Haplotype, 
+                                         hapFreq2 = hapFreq), 
+                        by = c("Population", "Locus", "Haplotype2")) %>%
+    mutate(gtProb = (2 * hapFreq2 * hapFreq)^2) %>%
+    select(-hapFreq2, -hapFreq, -total)
+  
+  #Isolate homozygote genotypes
+  homProbs <- hapFreqbyPop %>% 
+    group_by(Population, Locus) %>% 
+    tidyr::expand(Haplotype, Haplotype2 = Haplotype) %>% 
+    filter(Haplotype == Haplotype2)
+  
+  #Join genotypes and allele frequencies
+  homProbs <- left_join(homProbs, hapFreqbyPop, 
+                        by = c("Population", "Locus", "Haplotype")) %>% 
+    select(-total)
+  
+  #Calculate genotype probabilities
+  homProbs <- left_join(homProbs, dplyr::rename(hapFreqbyPop, Haplotype2 = Haplotype, hapFreq2 = hapFreq), 
+                        by = c("Population", "Locus", "Haplotype2")) %>%
+    mutate(gtProb = (hapFreq2 * hapFreq)^2) %>%
+    select(-hapFreq2, -hapFreq, -total)
+  
+  #Combine gtProbs
+  gtProbs <- bind_rows(homProbs, hetProbs) %>% 
+    arrange(Population, Locus)
+  
+  #tidying data before forensic parameters
+  paramsv1 <- hapFreqbyPop %>% 
+    mutate(
+      p2 = (hapFreq * hapFreq), 
+      p4 = hapFreq ^ 4,
+      dipN = total
+    ) %>% 
+    select(-total)
+  
+  #Calculate expected heterozygosity, effective number of alleles, and PIC
+  paramSum <- paramsv1 %>% 
+    select(-Haplotype, -hapFreq) %>% 
+    group_by(Population, Locus) %>% 
+    summarize(
+      expHet = round(1 - sum(p2) * (dipN / (dipN -1)), 3),
+      Ae = round(1 / sum(p2), 2),
+      PIC = round(1 - sum(p2) - (sum(p2)^2) + sum(p4), 3)
+    ) %>% 
+    ungroup() %>% 
+    distinct(Population, Locus, .keep_all = TRUE)
+  
+  #Calculate power of discrimination
+  tempPD <- gtProbs %>% 
+    group_by(Population, Locus) %>% 
+    summarize(
+      PD = round(1 - sum(gtProb), 3)
+    )
+  
+  #Join data frames
+  paramSum <- left_join(paramSum, obsHet, 
+                        by = c("Population", "Locus")) %>% 
+    left_join(tempPD, 
+              by = c("Population", "Locus"))
+  
+  hapFreqbyPop_wide <- pivot_wider(hapFreqbyPop, 
+                                 values_from = c("hapFreq", "total"), 
+                                 names_from = "Population")
+  
+  #Transpose data frames for readability
+  alleleFreqbyPop_wide <- pivot_wider(alleleFreqbyPop, 
+                                      values_from = c("alleleFreq", "total"), 
+                                      names_from = "Population")
+  
+  forensicParams_wide <- pivot_wider(paramSum, 
+                                     names_from = "Population", 
+                                     values_from = c("obsHet", "expHet", "Ae", "PIC", "obsHet", "PD"))
+  
+  combinedRMP <- paramSum %>% 
+    group_by(Population) %>% 
+    mutate(cRMP = prod(1 - PD)) %>% 
+    select(Population, cRMP) %>% 
+    distinct(Population, 
+             .keep_all = TRUE)
+  
+  #Export list of tables
+  return(list(hapFreqbyPop_wide, alleleFreqbyPop_wide, forensicParams_wide, combinedRMP, LocusWrapup, hbWrapup))
+}
+
+```
+
+
+
+```{r warning = FALSE, message = FALSE}
+
+
+#Calculate forensic parameters and performance metrics 
+deleteMe <- calc_ForensicParams(path_popdf = file.choose())
+
+#Return individual items 
+   {hapFreqbyPop_wide <- deleteMe[[1]]
+   alleleFreqbyPop_wide <- deleteMe[[2]]
+   forensicParams_wide <- deleteMe[[3]]
+   combinedRMP <- deleteMe[[4]]
+   LocusWrapup <- deleteMe[[5]]
+   hbWrapup <- deleteMe[[6]]
+}
+   
+```
+
