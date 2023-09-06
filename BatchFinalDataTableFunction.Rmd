@@ -1,0 +1,82 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+library(tidyverse)
+```
+
+
+
+```{r}
+choose_dat_dir <- function(caption = 'Select data directory') {
+  if (exists('utils::choose.dir')) {
+    choose.dir(caption = caption) 
+  } else {
+    tcltk::tk_choose.dir(caption = caption)
+  }
+}
+
+collectFinalDataTables <- function(path, recursive){
+  aoDir <- path
+  pathList <- as.data.frame(list.files(path = aoDir, 
+                                       pattern = "_FinalDataTable.tsv", 
+                                       recursive = recursive, 
+                                       full.names = TRUE))
+  colnames(pathList)[1] <- "Path"
+  pathList[2:6] <- as.data.frame(str_split(pathList$Path, "/", 
+                                           simplify = TRUE))
+  names(pathList) <- c("Path", "Directory", "Analyst", "OutputFolderID", "SampleName", "FileName")
+  map_dfr(pathList$Path, read_tsv, col_types = cols("SampleName" = "c", "Allele" = "c"))
+}
+
+compiledFDTs <- collectFinalDataTables(choose_dat_dir(), recursive = TRUE)
+
+
+```
+
+Don't forget to save your work
+```{r}
+write_tsv(compiledFDTs,paste0(choose.dir(),"\\FinalCallsConcat.tsv"))
+```
+
+
+
+```{r}
+
+
+aoDir <- "C:\\Users\\jlk0260\\Desktop\\STRaitRazorShiny\\data\\AnalysisOutput\\QIAseq_custom37plex\\STRaitRazoR_AnalysisResults\\00425-10_S5_L001"
+
+# KBK <- as.data.frame(list.files(path = aoDir, pattern = "_FinalDataTable.csv", recursive = TRUE, full.names = TRUE))
+MB <- as.data.frame(list.files(path = aoDir, pattern = "_FinalDataTable.tsv", recursive = TRUE, full.names = TRUE))
+# great <- as.data.frame(list.files(path = choose.dir(), pattern = "_DataTable.tsv", recursive = TRUE, full.names = TRUE))
+# colnames(great)[1] <- "Path"
+# great[2:6] <- as.data.frame(str_split(great$Path, "/", simplify = TRUE))
+# names(great) <- c("Path", "Directory", "Analyst", "OutputFolderID", "SampleName", "FileName")
+# greatd <- map_dfr(great$Path, read_tsv, col_types = cols("SampleName" = "c"))
+
+
+# colnames(KBK)[1] <- "Path"
+colnames(MB)[1] <- "Path"
+
+# KBK[2:6] <- as.data.frame(str_split(KBK$Path, "/", simplify = TRUE))
+MB[2:6] <- as.data.frame(str_split(MB$Path, "/", simplify = TRUE))
+
+# names(KBK) <- c("Path", "Directory", "Analyst", "OutputFolderID", "SampleName", "FileName")
+names(MB) <- c("Path", "Directory", "Analyst", "OutputFolderID", "SampleName", "FileName")
+
+MB_CompiledFinalData <- map_dfr(MB$Path, read_tsv, col_types = cols("SampleName" = "c", "FinalAllele" = "c"))
+# KBK_CompiledFinalData <- map_dfr(KBK$Path, read_csv, col_types = cols("SampleName" = "c")) %>% 
+  # select(-X1)
+
+collectFinalDataTables(choose_dat_dir(), recursive = TRUE)
+
+MB_Uncalled <- anti_join(KBK_CompiledFinalData, MB_CompiledFinalData, by = "Haplotype")
+  
+KBK_Uncalled <- anti_join(MB_CompiledFinalData, KBK_CompiledFinalData, by = "Haplotype")
+```
+
+
